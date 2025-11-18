@@ -1,42 +1,104 @@
-name: Terraform Apply
+name: Terraform CI/CD
 
+# Plan on PRs, plan+apply on pushes to main
 on:
+  pull_request:
+    types: [opened, synchronize, reopened]
   push:
-    branches: [ main ]
+    branches:
+      - main
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   terraform:
     runs-on: ubuntu-latest
+    env:
+      TF_INPUT: "false"
+      # Optional: set default region/zone here, or pass via -var in plan/apply
+      REGION: us-central1
+      ZONE: us-central1-a
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Terraform
+      - name: Cache Terraform plugins and lockfile
+        uses: actions/cache@v4
+        with:
+          path: |
+            .terraform
+            .terraform.lock.hcl
+          key: ${{ runner.os }}-terraform-${{ hashFiles('**/*.tf*') }}
+          restore-keys: |
+            ${{ runner.os }}-terraform-
+
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.5.0
 
-      - name: Install gcloud SDK
-        uses: google-github-actions/setup-gcloud@v1
-        with:
-          project_id: ${{ secrets.GCP_PROJECT }}
-          version: 'latest'
-
-      - name: Authenticate to GCP
+      # Authenticate to GCP using Service Account JSON stored in secret
+      # This exports GOOGLE_CREDENTIALS for Terraform google provider
+      - name: Configure GCP credentials
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         run: |
-          echo "$GCP_SA_KEY" > /tmp/gcloud-key.json
-          gcloud auth activate-service-account --key-file=/tmp/gcloud-key.json
-          gcloud config set project ${{ secrets.GCP_PROJECT }}
+          if [ -z "$GCP_SA_KEY" ]; then
+            echo "Error: GCP_SA_KEY secret is not set" >&2
+            exit 1
+          fi
+          echo "$GCP_SA_KEY" > "${{ runner.temp }}/gcloud-key.json"
+          # export for Terraform provider
+          echo "Setting GOOGLE_CREDENTIALS"
+          export GOOGLE_CREDENTIALS="$(cat ${ { runner.temp } }/gcloud-key.json)" || true
+          # Also create file path env var used by gcloud CLI if needed
+          echo "GCLOUD_KEY_PATH=${{ runner.temp }}/gcloud-key.json" >> $GITHUB_ENV
+          # Export GOOGLE_CREDENTIALS into workflow env for Terraform
+          echo "GOOGLE_CREDENTIALS<<EOF" >> $GITHUB_ENV
+          cat "${{ runner.temp }}/gcloud-key.json" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
       - name: Terraform Init
-        run: terraform init
+        run: terraform init -input=false
 
-      - name: Terraform Plan
-        run: terraform plan -var="project_id=${{ secrets.GCP_PROJECT }}" -var="region=us-central1" -var="zone=us-central1-a"
+      - name: Terraform Validate
+        run: terraform validate
 
-      - name: Terraform Apply
-        if: github.ref == 'refs/heads/main'
-        run: terraform apply -auto-approve -var="project_id=${{ secrets.GCP_PROJECT }}" -var="region=us-central1" -var="zone=us-central1-a"
+      - name: Terraform Format Check
+        run: terraform fmt -check
+
+      - name: Terraform Plan (pull_request: fast)
+        if: github.event_name == 'pull_request'
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          terraform plan -refresh=false -input=false -parallelism=20 \
+            -var "project=${{ secrets.GCP_PROJECT }}" \
+            -var "region=${{ env.REGION }}" \
+            -var "zone=${{ env.ZONE }}"
+
+      - name: Terraform Plan (push to main: full refresh)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          terraform plan -input=false -parallelism=20 \
+            -var "project=${{ secrets.GCP_PROJECT }}" \
+            -var "region=${{ env.REGION }}" \
+            -var "zone=${{ env.ZONE }}"
+
+      - name: Terraform Apply (only on push to main)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          terraform apply -auto-approve -input=false \
+            -var "project=${{ secrets.GCP_PROJECT }}" \
+            -var "region=${{ env.REGION }}" \
+            -var "zone=${{ env.ZONE }}"
