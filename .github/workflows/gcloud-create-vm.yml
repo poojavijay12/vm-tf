@@ -1,0 +1,43 @@
+name: Create Private VM via gcloud
+on:
+  workflow_dispatch:
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+          version: 'latest'
+
+      - name: Authenticate
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          echo "$GCP_SA_KEY" > /tmp/gcloud-key.json
+          gcloud auth activate-service-account --key-file=/tmp/gcloud-key.json
+          gcloud config set project ${{ secrets.GCP_PROJECT }}
+
+      - name: Create VPC and Subnet
+        run: |
+          gcloud compute networks create my-vpc --subnet-mode=custom || true
+          gcloud compute networks subnets create private-subnet --network=my-vpc --region=us-central1 --range=10.10.0.0/24 --enable-private-ip-google-access || true
+
+      - name: Create Router and NAT
+        run: |
+          gcloud compute routers create my-router --network=my-vpc --region=us-central1 || true
+          gcloud compute routers nats create my-nat --router=my-router --region=us-central1 --nat-all-subnet-ip-ranges --auto-allocate-nat-external-ips || true
+
+      - name: Create VM without external IP
+        run: |
+          gcloud iam service-accounts create vm-sa --display-name="vm service account" || true
+          gcloud compute instances create private-vm --zone=us-central1-a --machine-type=e2-medium --network-interface=network=my-vpc,subnet=private-subnet,no-address --image-family=debian-12 --image-project=debian-cloud || true
+
+      - name: Print internal IP
+        run: |
+          gcloud compute instances describe private-vm --zone=us-central1-a --format='get(networkInterfaces[0].networkIP)'
