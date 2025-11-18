@@ -17,13 +17,19 @@ permissions:
 jobs:
   terraform:
     runs-on: ubuntu-latest
+
+    # Environment available to all steps
     env:
       TF_INPUT: "false"
       REGION: us-central1
       ZONE: us-central1-a
+      # Make sure this secret exists in repo Settings -> Secrets
+      GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
+      # Optional: the project id secret
+      GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Cache Terraform plugins and lockfile
@@ -41,15 +47,10 @@ jobs:
         with:
           terraform_version: 1.5.0
 
-      # Authenticate to GCP using Service Account JSON stored in secret
-      - name: Authenticate to GCP
+      - name: Authenticate to GCP (service account JSON)
         uses: google-github-actions/auth@v1
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      # Export GOOGLE_CREDENTIALS for Terraform provider (some providers read this env)
-      - name: Export GOOGLE_CREDENTIALS
-        run: echo "GOOGLE_CREDENTIALS=${{ secrets.GCP_SA_KEY }}" >> $GITHUB_ENV
 
       - name: Terraform Init
         run: terraform init -input=false
@@ -60,32 +61,26 @@ jobs:
       - name: Terraform Format Check
         run: terraform fmt -check
 
-      - name: Terraform Plan (pull_request: fast)
+      - name: Terraform Plan (fast) - PRs only
         if: github.event_name == 'pull_request'
-        env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
         run: |
           terraform plan -refresh=false -input=false -parallelism=20 \
-            -var "project=${{ secrets.GCP_PROJECT }}" \
+            -var "project=${{ env.GCP_PROJECT }}" \
             -var "region=${{ env.REGION }}" \
             -var "zone=${{ env.ZONE }}"
 
-      - name: Terraform Plan (push to main: full refresh)
+      - name: Terraform Plan (full) - push to main
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
         run: |
           terraform plan -input=false -parallelism=20 \
-            -var "project=${{ secrets.GCP_PROJECT }}" \
+            -var "project=${{ env.GCP_PROJECT }}" \
             -var "region=${{ env.REGION }}" \
             -var "zone=${{ env.ZONE }}"
 
       - name: Terraform Apply (only on push to main)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
         run: |
           terraform apply -auto-approve -input=false \
-            -var "project=${{ secrets.GCP_PROJECT }}" \
+            -var "project=${{ env.GCP_PROJECT }}" \
             -var "region=${{ env.REGION }}" \
             -var "zone=${{ env.ZONE }}"
