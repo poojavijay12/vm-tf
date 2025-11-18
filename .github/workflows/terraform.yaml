@@ -1,6 +1,5 @@
 name: Terraform CI/CD
 
-# Plan on PRs, plan+apply on pushes to main
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -20,7 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TF_INPUT: "false"
-      # Optional: set default region/zone here, or pass via -var in plan/apply
       REGION: us-central1
       ZONE: us-central1-a
 
@@ -44,25 +42,14 @@ jobs:
           terraform_version: 1.5.0
 
       # Authenticate to GCP using Service Account JSON stored in secret
-      # This exports GOOGLE_CREDENTIALS for Terraform google provider
-      - name: Configure GCP credentials
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-        run: |
-          if [ -z "$GCP_SA_KEY" ]; then
-            echo "Error: GCP_SA_KEY secret is not set" >&2
-            exit 1
-          fi
-          echo "$GCP_SA_KEY" > "${{ runner.temp }}/gcloud-key.json"
-          # export for Terraform provider
-          echo "Setting GOOGLE_CREDENTIALS"
-          export GOOGLE_CREDENTIALS="$(cat ${ { runner.temp } }/gcloud-key.json)" || true
-          # Also create file path env var used by gcloud CLI if needed
-          echo "GCLOUD_KEY_PATH=${{ runner.temp }}/gcloud-key.json" >> $GITHUB_ENV
-          # Export GOOGLE_CREDENTIALS into workflow env for Terraform
-          echo "GOOGLE_CREDENTIALS<<EOF" >> $GITHUB_ENV
-          cat "${{ runner.temp }}/gcloud-key.json" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      # Export GOOGLE_CREDENTIALS for Terraform provider (some providers read this env)
+      - name: Export GOOGLE_CREDENTIALS
+        run: echo "GOOGLE_CREDENTIALS=${{ secrets.GCP_SA_KEY }}" >> $GITHUB_ENV
 
       - name: Terraform Init
         run: terraform init -input=false
