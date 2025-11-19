@@ -57,13 +57,13 @@ jobs:
         run: terraform validate
 
       - name: Terraform Format Check
-        run: terraform fmt -check
+        run: terraform fmt -check -recursive
 
-      - name: Terraform Plan (PRs only)
+      - name: Terraform Plan (fast) - PRs only
         if: github.event_name == 'pull_request'
         run: |
           terraform plan -refresh=false -input=false -parallelism=20 \
-            -var "project=${{ env.GCP_PROJECT }}" \
+            -var "project_id=${{ env.GCP_PROJECT }}" \
             -var "region=${{ env.REGION }}" \
             -var "zone=${{ env.ZONE }}"
 
@@ -71,7 +71,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           terraform plan -input=false -parallelism=20 \
-            -var "project=${{ env.GCP_PROJECT }}" \
+            -var "project_id=${{ env.GCP_PROJECT }}" \
             -var "region=${{ env.REGION }}" \
             -var "zone=${{ env.ZONE }}"
 
@@ -79,6 +79,6 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           terraform apply -auto-approve -input=false \
-            -var "project=${{ env.GCP_PROJECT }}" \
+            -var "project_id=${{ env.GCP_PROJECT }}" \
             -var "region=${{ env.REGION }}" \
             -var "zone=${{ env.ZONE }}"
