@@ -1,43 +1,222 @@
-name: Create Private VM via gcloud
+name: Create Private VM, Artifact Registry, and GKE
+
 on:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   create:
     runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+      REGION: us-central1
+      ZONE: us-central1-a
+      VPC_NAME: my-vpc
+      SUBNET_NAME: private-subnet
+      SUBNET_RANGE: 10.10.0.0/24
+      ROUTER_NAME: my-router
+      NAT_NAME: my-nat
+      VM_NAME: private-vm
+      VM_SA: vm-sa
+      GKE_CLUSTER: private-cluster
+      GKE_NODE_SA: gke-node-sa
+      ARTIFACT_REPO: my-docker-repo
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup gcloud
+      - name: Authenticate to GCP (service account JSON)
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud CLI (with kubectl)
         uses: google-github-actions/setup-gcloud@v1
         with:
           project_id: ${{ secrets.GCP_PROJECT }}
+          export_default_credentials: true
           version: 'latest'
+          install_components: 'kubectl'
 
-      - name: Authenticate
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+      - name: Create VPC if missing
         run: |
-          echo "$GCP_SA_KEY" > /tmp/gcloud-key.json
-          gcloud auth activate-service-account --key-file=/tmp/gcloud-key.json
-          gcloud config set project ${{ secrets.GCP_PROJECT }}
+          if ! gcloud compute networks describe ${VPC_NAME} --project=${GCP_PROJECT} >/dev/null 2>&1; then
+            gcloud compute networks create ${VPC_NAME} --subnet-mode=custom --project=${GCP_PROJECT}
+            echo "Created VPC ${VPC_NAME}"
+          else
+            echo "VPC ${VPC_NAME} exists"
+          fi
 
-      - name: Create VPC and Subnet
+      - name: Create Subnet if missing
         run: |
-          gcloud compute networks create my-vpc --subnet-mode=custom || true
-          gcloud compute networks subnets create private-subnet --network=my-vpc --region=us-central1 --range=10.10.0.0/24 --enable-private-ip-google-access || true
+          if ! gcloud compute networks subnets describe ${SUBNET_NAME} --region=${REGION} --project=${GCP_PROJECT} >/dev/null 2>&1; then
+            gcloud compute networks subnets create ${SUBNET_NAME} \
+              --network=${VPC_NAME} \
+              --region=${REGION} \
+              --range=${SUBNET_RANGE} \
+              --enable-private-ip-google-access \
+              --project=${GCP_PROJECT}
+            echo "Created subnet ${SUBNET_NAME}"
+          else
+            echo "Subnet ${SUBNET_NAME} exists"
+          fi
 
-      - name: Create Router and NAT
+      - name: Create Router and NAT (idempotent)
         run: |
-          gcloud compute routers create my-router --network=my-vpc --region=us-central1 || true
-          gcloud compute routers nats create my-nat --router=my-router --region=us-central1 --nat-all-subnet-ip-ranges --auto-allocate-nat-external-ips || true
+          if ! gcloud compute routers describe ${ROUTER_NAME} --region=${REGION} --project=${GCP_PROJECT} >/dev/null 2>&1; then
+            gcloud compute routers create ${ROUTER_NAME} --network=${VPC_NAME} --region=${REGION} --project=${GCP_PROJECT}
+            echo "Created router ${ROUTER_NAME}"
+          else
+            echo "Router ${ROUTER_NAME} exists"
+          fi
 
-      - name: Create VM without external IP
-        run: |
-          gcloud iam service-accounts create vm-sa --display-name="vm service account" || true
-          gcloud compute instances create private-vm --zone=us-central1-a --machine-type=e2-medium --network-interface=network=my-vpc,subnet=private-subnet,no-address --image-family=debian-12 --image-project=debian-cloud || true
+          if ! gcloud compute routers nats describe ${NAT_NAME} --router=${ROUTER_NAME} --region=${REGION} --project=${GCP_PROJECT} >/dev/null 2>&1; then
+            gcloud compute routers nats create ${NAT_NAME} \
+              --router=${ROUTER_NAME} \
+              --region=${REGION} \
+              --nat-all-subnet-ip-ranges \
+              --auto-allocate-nat-external-ips \
+              --project=${GCP_PROJECT}
+            echo "Created NAT ${NAT_NAME}"
+          else
+            echo "NAT ${NAT_NAME} exists"
+          fi
 
-      - name: Print internal IP
+      - name: Create VM service account (idempotent)
         run: |
-          gcloud compute instances describe private-vm --zone=us-central1-a --format='get(networkInterfaces[0].networkIP)'
+          if ! gcloud iam service-accounts list --filter="email:${VM_SA}@${GCP_PROJECT}.iam.gserviceaccount.com" --format='value(email)' --project=${GCP_PROJECT} >/dev/null 2>&1; then
+            gcloud iam service-accounts create ${VM_SA} --display-name="vm service account" --project=${GCP_PROJECT}
+            echo "Created service account ${VM_SA}"
+          else
+            echo "Service account ${VM_SA} exists"
+          fi
+
+      - name: Create VM without external IP (idempotent)
+        run: |
+          if ! gcloud compute instances describe ${VM_NAME} --zone=${ZONE} --project=${GCP_PROJECT} >/dev/null 2>&1; then
+            gcloud compute instances create ${VM_NAME} \
+              --zone=${ZONE} \
+              --machine-type=e2-medium \
+              --subnet=${SUBNET_NAME} \
+              --no-address \
+              --image-family=debian-12 \
+              --image-project=debian-cloud \
+              --service-account=${VM_SA}@${GCP_PROJECT}.iam.gserviceaccount.com \
+              --project=${GCP_PROJECT}
+            echo "Created VM ${VM_NAME}"
+          else
+            echo "VM ${VM_NAME} exists"
+          fi
+
+      - name: Enable required APIs (idempotent)
+        run: |
+          gcloud services enable container.googleapis.com artifactregistry.googleapis.com compute.googleapis.com iam.googleapis.com --project=${GCP_PROJECT} || true
+
+      - name: Create Artifact Registry (docker) if missing
+        run: |
+          if ! gcloud artifacts repositories describe ${ARTIFACT_REPO} --location=${REGION} --project=${GCP_PROJECT} >/dev/null 2>&1; then
+            gcloud artifacts repositories create ${ARTIFACT_REPO} \
+              --repository-format=docker \
+              --location=${REGION} \
+              --description="Docker repo for CI images" \
+              --project=${GCP_PROJECT}
+            echo "Created Artifact Registry repo ${ARTIFACT_REPO}"
+          else
+            echo "Artifact Registry ${ARTIFACT_REPO} exists"
+          fi
+
+      - name: Create GKE node service account (idempotent)
+        run: |
+          if ! gcloud iam service-accounts list --filter="email:${GKE_NODE_SA}@${GCP_PROJECT}.iam.gserviceaccount.com" --format='value(email)' --project=${GCP_PROJECT} >/dev/null 2>&1; then
+            gcloud iam service-accounts create ${GKE_NODE_SA} --display-name="GKE Node Service Account" --project=${GCP_PROJECT}
+            echo "Created service account ${GKE_NODE_SA}"
+          else
+            echo "Service account ${GKE_NODE_SA} exists"
+          fi
+
+      - name: Grant node SA permission to read Artifact Registry (idempotent)
+        run: |
+          # grant artifact registry reader to the node service account
+          gcloud projects add-iam-policy-binding ${GCP_PROJECT} \
+            --member="serviceAccount:${GKE_NODE_SA}@${GCP_PROJECT}.iam.gserviceaccount.com" \
+            --role="roles/artifactregistry.reader" || true
+          # also ensure the node SA can get secrets if using GCR fallback
+          gcloud projects add-iam-policy-binding ${GCP_PROJECT} \
+            --member="serviceAccount:${GKE_NODE_SA}@${GCP_PROJECT}.iam.gserviceaccount.com" \
+            --role="roles/storage.objectViewer" || true
+          echo "Ensured ${GKE_NODE_SA} has artifactregistry.reader and storage.objectViewer"
+
+      - name: Enable Workload Identity on project-level (noop if already)
+        run: |
+          # Workload Identity is a cluster-level feature; nothing to enable project-wide here.
+          echo "No-op: Workload Identity will be configured on cluster creation."
+
+      - name: Create Private GKE cluster (idempotent)
+        run: |
+          CLUSTER_NAME=${GKE_CLUSTER}
+          REGION=${REGION}
+          MASTER_CIDR="172.16.0.0/28"
+
+          if ! gcloud container clusters describe ${CLUSTER_NAME} --region=${REGION} --project=${GCP_PROJECT} >/dev/null 2>&1; then
+            gcloud container clusters create ${CLUSTER_NAME} \
+              --region=${REGION} \
+              --cluster-version=latest \
+              --machine-type=e2-standard-4 \
+              --num-nodes=1 \
+              --enable-ip-alias \
+              --enable-private-nodes \
+              --enable-private-endpoint \
+              --master-ipv4-cidr=${MASTER_CIDR} \
+              --network=${VPC_NAME} \
+              --subnetwork=${SUBNET_NAME} \
+              --no-issue-client-certs \
+              --workload-pool=${GCP_PROJECT}.svc.id.goog \
+              --project=${GCP_PROJECT}
+            echo "Created cluster ${CLUSTER_NAME}"
+          else
+            echo "Cluster ${CLUSTER_NAME} exists"
+          fi
+
+      - name: Create node pool using node SA (idempotent)
+        run: |
+          NODEPOOL_NAME=pool-standard
+          CLUSTER_NAME=${GKE_CLUSTER}
+          REGION=${REGION}
+
+          # If nodepool exists, skip
+          if gcloud container node-pools describe ${NODEPOOL_NAME} --cluster=${CLUSTER_NAME} --region=${REGION} --project=${GCP_PROJECT} >/dev/null 2>&1; then
+            echo "Node pool ${NODEPOOL_NAME} exists"
+          else
+            gcloud container node-pools create ${NODEPOOL_NAME} \
+              --cluster=${CLUSTER_NAME} \
+              --region=${REGION} \
+              --num-nodes=3 \
+              --machine-type=e2-standard-4 \
+              --service-account=${GKE_NODE_SA}@${GCP_PROJECT}.iam.gserviceaccount.com \
+              --project=${GCP_PROJECT}
+            echo "Created node pool ${NODEPOOL_NAME}"
+          fi
+
+      - name: Attempt to get kubeconfig (may fail for private control plane)
+        run: |
+          CLUSTER_NAME=${GKE_CLUSTER}
+          REGION=${REGION}
+          if gcloud container clusters describe ${CLUSTER_NAME} --region=${REGION} --project=${GCP_PROJECT} >/dev/null 2>&1; then
+            echo "Attempting to get credentials for ${CLUSTER_NAME} (may fail if runner cannot reach private endpoint)"
+            set +e
+            gcloud container clusters get-credentials ${CLUSTER_NAME} --region=${REGION} --project=${GCP_PROJECT} || true
+            kubectl get nodes --no-headers -o wide || true
+            set -e
+          else
+            echo "Cluster not present; skipping get-credentials"
+          fi
+
+      - name: Print VM internal IP & cluster info
+        run: |
+          echo "VM internal IP:"
+          gcloud compute instances describe ${VM_NAME} --zone=${ZONE} --project=${GCP_PROJECT} --format='get(networkInterfaces[0].networkIP)' || true
+          echo "Cluster endpoint (may be private):"
+          gcloud container clusters describe ${GKE_CLUSTER} --region=${REGION} --project=${GCP_PROJECT} --format='value(endpoint)' || true
