@@ -17,7 +17,7 @@ locals {
 # Enable APIs (best effort via null_resource local-exec)
 resource "null_resource" "enable_apis" {
   provisioner "local-exec" {
-    command = <<EOT
+    command     = <<EOT
       set -e
       gcloud services enable compute.googleapis.com container.googleapis.com artifactregistry.googleapis.com iam.googleapis.com --project=${local.project}
     EOT
@@ -83,7 +83,7 @@ resource "google_compute_instance" "private_vm" {
   }
 
   network_interface {
-    subnetwork         = google_compute_subnetwork.private.name
+    subnetwork = google_compute_subnetwork.private.name
     access_config {} # do NOT include access_config to leave no external IP; but terraform requires empty block for default? -- omit to ensure no external. (We'll set no external via network_interface[0].access_config is absent)
   }
 
