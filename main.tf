@@ -120,9 +120,8 @@ resource "google_container_cluster" "primary" {
   network    = google_compute_network.vpc.self_link
   subnetwork = google_compute_subnetwork.private.self_link
 
-  ip_allocation_policy {
-    use_ip_aliases = true
-  }
+  ip_allocation_policy {}
+
 
   private_cluster_config {
     enable_private_nodes    = true
