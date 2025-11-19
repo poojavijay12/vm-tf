@@ -14,16 +14,7 @@ locals {
   artifact_repo = var.artifact_repo
 }
 
-# Enable APIs (best effort via null_resource local-exec)
-resource "null_resource" "enable_apis" {
-  provisioner "local-exec" {
-    command     = <<EOT
-      set -e
-      gcloud services enable compute.googleapis.com container.googleapis.com artifactregistry.googleapis.com iam.googleapis.com --project=${local.project}
-    EOT
-    interpreter = ["/bin/bash", "-c"]
-  }
-}
+
 
 # VPC
 resource "google_compute_network" "vpc" {
