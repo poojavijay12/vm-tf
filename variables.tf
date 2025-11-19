@@ -47,8 +47,9 @@ variable "vm_name" {
 
 variable "vm_service_account" {
   type    = string
-  default = "vm-sa"
+  default = "vm-sa-01"
 }
+
 
 variable "gke_cluster_name" {
   type    = string
